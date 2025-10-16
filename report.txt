@@ -1,0 +1,63 @@
+Starting diagnostics at 2025-10-16 10:06:00
+
+===== System Information =====
+Operating System: Linux
+Platform: Linux-6.8.0-85-generic-x86_64-with-glibc2.39
+Architecture: ('64bit', 'ELF')
+Machine: x86_64
+Processor: x86_64
+WARNING: psutil module not found. Cannot determine RAM information.
+Free Disk Space: 279.22 GB
+
+===== File System Information =====
+Current Directory: /home/dynamodenis/Desktop/projects/agentic-ai/agents
+Write permission: OK
+
+Files in Parent Directory:
+ - agents
+
+===== Git Repository Information =====
+Git Repository Root: /home/dynamodenis/Desktop/projects/agentic-ai/agents
+Current Commit: 37a1250eafb6a520f878bf5016edce1dc7152d2a
+Remote Origin: git@github.com:ed-donner/agents.git
+
+===== Environment File Check =====
+WARNING: .env file not found in project root
+
+===== Virtualenv Check =====
+ERROR: Virtualenv check failed: expected str, bytes or os.PathLike object, not NoneType
+
+===== Network Connectivity Check =====
+SSL Version: OpenSSL 3.0.13 30 Jan 2024
+ERROR: Required packages are not installed. Please install them using 'pip install requests speedtest-cli'
+
+===== Environment Variables Check =====
+
+PYTHONPATH is not set, as expected.
+
+Python sys.path:
+ - /home/dynamodenis/Desktop/projects/agentic-ai/agents/setup
+ - /usr/lib/python312.zip
+ - /usr/lib/python3.12
+ - /usr/lib/python3.12/lib-dynload
+ - /usr/local/lib/python3.12/dist-packages
+ - /usr/lib/python3/dist-packages
+WARNING: OPENAI_API_KEY environment variable is not set after calling load_dotenv()
+
+===== Additional Diagnostics =====
+Temp directory is writable: /tmp
+
+===== Warnings Found =====
+The following warnings were detected. They might not prevent the program from running but could cause unexpected behavior:
+- psutil module not found. Cannot determine RAM information.
+- .env file not found in project root
+- OPENAI_API_KEY environment variable is not set after calling load_dotenv()
+
+===== Errors Found =====
+The following critical issues were detected. Please address them before proceeding:
+- Virtualenv check failed: expected str, bytes or os.PathLike object, not NoneType
+- Required packages are not installed. Please install them using 'pip install requests speedtest-cli'
+
+
+Completed diagnostics at 2025-10-16 10:06:00
+
