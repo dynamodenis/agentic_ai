@@ -36,10 +36,11 @@ def run():
         'module_name': module_name,
         'class_name': class_name
     }
-
-    # Create and run the crew
-    result = EngineeringTeam().crew().kickoff(inputs=inputs)
-
+    try:
+        # Create and run the crew
+        result = EngineeringTeam().crew().kickoff(inputs=inputs)
+    except Exception as e:
+        raise e
 
 if __name__ == "__main__":
     run()
