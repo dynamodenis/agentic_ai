@@ -1,382 +1,411 @@
 from __future__ import annotations
 
-import threading
-import uuid
-from contextlib import contextmanager
+"""
+storage.py
+
+A self-contained in-memory repository that maintains data structures for
+accounts, holdings, and transactions. It provides a simple, thread-safe layer
+for storing and retrieving these records without enforcing business rules from
+higher-level services.
+
+This module is intentionally minimal and focuses on storage concerns only:
+  - Accounts: id -> balance (Decimal)
+  - Holdings: account_id -> symbol -> quantity (Decimal)
+  - Transactions: append-only immutable records
+
+Notes:
+  - Input validation ensures basic types and normalization (IDs trimmed, symbols
+    upper-cased, finite Decimal values).
+  - No monetary rounding or domain validations are applied here; those belong
+    to higher-level services. The store accepts provided Decimal-like values as-is.
+  - Thread-safe via an internal re-entrant lock (RLock).
+"""
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_EVEN, InvalidOperation
+from decimal import Decimal, InvalidOperation
+from threading import RLock
 from typing import Dict, List, Optional, Union
+from uuid import uuid4
+
+__all__ = [
+    "StorageError",
+    "StorageValidationError",
+    "RecordNotFoundError",
+    "DuplicateRecordError",
+    "AccountSnapshot",
+    "TransactionRecord",
+    "InMemoryStore",
+]
+
+NumberLike = Union[int, float, str, Decimal]
 
 
-Number = Union[Decimal, int, float, str]
+class StorageError(Exception):
+    """Base exception for storage-related errors."""
 
 
-@dataclass
-class Account:
-    """Represents a stored account with cash balance and creation timestamp.
+class StorageValidationError(StorageError):
+    """Raised when input validation fails for the storage layer."""
 
-    Fields:
-        id: Unique account identifier.
-        cash_balance: Current cash balance (quantized to cash precision).
-        created_at: Account creation timestamp (timezone-aware UTC).
-    """
 
-    id: str
-    cash_balance: Decimal
-    created_at: datetime
+class RecordNotFoundError(StorageError):
+    """Raised when a requested record does not exist in the store."""
+
+
+class DuplicateRecordError(StorageError):
+    """Raised when attempting to create a record that already exists."""
 
 
 @dataclass(frozen=True)
-class Transaction:
-    """Immutable transaction record persisted by the store.
+class AccountSnapshot:
+    """Immutable snapshot of an account record.
 
-    Fields:
-        timestamp: Creation time of the entry (timezone-aware UTC).
-        account_id: Identifier of the account affected.
-        type: Transaction type (e.g., 'deposit', 'withdrawal', 'buy', 'sell', 'adjust').
-        amount: Cash amount for the transaction (non-negative cash value at cash precision).
-        balance_after: Optional cash balance after the transaction.
-        symbol: Optional symbol for buy/sell/position adjustments.
-        quantity: Optional quantity for symbol-related transactions (qty precision).
-        price: Optional unit price for buy/sell transactions (cash precision).
-        position_after: Optional position quantity after symbol-related transactions (qty precision).
-        memo: Optional free-form note.
+    Attributes:
+        id: Account identifier.
+        balance: Current balance stored for the account.
     """
 
-    timestamp: datetime
+    id: str
+    balance: Decimal
+
+
+@dataclass(frozen=True)
+class TransactionRecord:
+    """Immutable transaction record stored by the repository.
+
+    Attributes:
+        id: Unique transaction identifier (UUID4 hex).
+        account_id: The account associated with the transaction.
+        kind: One of "DEPOSIT", "WITHDRAWAL", "BUY", "SELL".
+        timestamp: UTC timestamp when the transaction was recorded.
+        amount: Cash flow amount. Positive for inflows (DEPOSIT, SELL),
+                negative for outflows (WITHDRAWAL, BUY).
+        symbol: Optional traded asset symbol (upper-cased) for BUY/SELL.
+        quantity: Optional executed quantity for BUY/SELL.
+        price: Optional executed price per unit for BUY/SELL.
+        total: Optional total trade value for BUY/SELL.
+    """
+
+    id: str
     account_id: str
-    type: str
+    kind: str
+    timestamp: datetime
     amount: Decimal
-    balance_after: Optional[Decimal]
     symbol: Optional[str] = None
     quantity: Optional[Decimal] = None
     price: Optional[Decimal] = None
-    position_after: Optional[Decimal] = None
-    memo: Optional[str] = None
+    total: Optional[Decimal] = None
 
 
 class InMemoryStore:
-    """In-memory persistence and atomic updates for accounts, holdings, and transactions.
+    """Thread-safe in-memory repository for accounts, holdings, and transactions.
 
-    This storage provides:
-      - Creation and management of accounts with cash balances.
-      - Per-account holdings storage (symbol -> quantity).
-      - Global and per-account immutable transaction logging.
-      - Thread-safety and atomic updates via an internal re-entrant lock and an
-        `atomic()` context manager for multi-step operations.
-
-    The store performs quantization of cash and quantity values using Decimal with
-    configurable precision and rounding. Business validations (e.g., sufficient funds)
-    are intentionally minimal so higher-level services can impose domain-specific rules.
+    This class provides a minimal storage abstraction that higher-level services
+    can use to persist and retrieve domain data without coupling to a specific
+    storage technology.
     """
 
-    def __init__(
-        self,
-        cash_decimal_places: int = 2,
-        qty_decimal_places: int = 8,
-        rounding=ROUND_HALF_EVEN,
-    ) -> None:
-        if cash_decimal_places < 0:
-            raise ValueError("cash_decimal_places must be non-negative")
-        if qty_decimal_places < 0:
-            raise ValueError("qty_decimal_places must be non-negative")
-
-        self._cash_q: Decimal = Decimal(10) ** (-cash_decimal_places)
-        self._qty_q: Decimal = Decimal(10) ** (-qty_decimal_places)
-        self._rounding = rounding
-
-        self._accounts: Dict[str, Account] = {}
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._accounts: Dict[str, Decimal] = {}
         self._holdings: Dict[str, Dict[str, Decimal]] = {}
-        self._transactions: List[Transaction] = []
-        self._per_account_tx: Dict[str, List[Transaction]] = {}
-        self._lock = threading.RLock()
+        self._transactions: List[TransactionRecord] = []
 
-    # ---------------------------- Account APIs ----------------------------
-    def create_account(self, account_id: Optional[str] = None, *, initial_cash: Number = 0) -> str:
-        """Create a new account with an optional initial cash balance.
+    # -----------------------------
+    # Account storage operations
+    # -----------------------------
+
+    def create_account(self, account_id: Optional[str] = None, initial_balance: NumberLike = 0) -> str:
+        """Create a new account with an optional initial balance.
 
         Args:
-            account_id: Optional explicit account identifier. If None, a UUID4 hex is generated.
-            initial_cash: Initial cash balance (quantized to cash precision). Must be non-negative.
+            account_id: Optional explicit ID; if None, a UUID4 hex is generated.
+            initial_balance: Initial balance (number-like), stored as Decimal.
 
         Returns:
-            The created account identifier.
+            The created account ID.
 
         Raises:
-            ValueError: If the account already exists or initial_cash is negative/invalid.
+            StorageValidationError: If account_id is invalid or initial_balance is not a finite number.
+            DuplicateRecordError: If an account with the given ID already exists.
         """
+        acc_id = self._normalize_id(account_id) if account_id is not None else uuid4().hex
+        balance = self._coerce_decimal(initial_balance)
+
         with self._lock:
-            aid = account_id or uuid.uuid4().hex
-            if aid in self._accounts:
-                raise ValueError(f"Account '{aid}' already exists")
+            if acc_id in self._accounts:
+                raise DuplicateRecordError(f"account '{acc_id}' already exists")
+            self._accounts[acc_id] = balance
+        return acc_id
 
-            cash = self._to_cash(initial_cash)
-            if cash < Decimal(0):
-                raise ValueError("initial_cash cannot be negative")
-
-            now = datetime.now(timezone.utc)
-            self._accounts[aid] = Account(id=aid, cash_balance=cash, created_at=now)
-            self._holdings[aid] = {}
-            self._per_account_tx[aid] = []
-            return aid
-
-    def list_accounts(self) -> List[str]:
-        """Return a list of all account IDs."""
-        with self._lock:
-            return list(self._accounts.keys())
-
-    def get_account(self, account_id: str) -> Account:
-        """Return a snapshot of the account.
+    def get_account(self, account_id: str) -> AccountSnapshot:
+        """Retrieve an immutable snapshot of the account.
 
         Raises:
-            KeyError: If the account does not exist.
+            StorageValidationError: If account_id is invalid.
+            RecordNotFoundError: If the account does not exist.
         """
+        acc_id = self._normalize_id(account_id)
         with self._lock:
-            acct = self._get_account(account_id)
-            # Return a defensive copy to avoid external mutation of internal state
-            return Account(id=acct.id, cash_balance=acct.cash_balance, created_at=acct.created_at)
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            return AccountSnapshot(id=acc_id, balance=self._accounts[acc_id])
 
-    def get_cash_balance(self, account_id: str) -> Decimal:
-        """Return the current cash balance for the account.
+    def get_balance(self, account_id: str) -> Decimal:
+        """Get the current balance for an account."""
+        return self.get_account(account_id).balance
 
-        Raises:
-            KeyError: If the account does not exist.
+    def set_balance(self, account_id: str, new_balance: NumberLike) -> Decimal:
+        """Set the account balance to a new value.
+
+        Returns:
+            The stored balance as Decimal.
         """
+        acc_id = self._normalize_id(account_id)
+        bal = self._coerce_decimal(new_balance)
         with self._lock:
-            return self._get_account(account_id).cash_balance
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            self._accounts[acc_id] = bal
+            return bal
 
-    def set_cash_balance(self, account_id: str, new_balance: Number) -> Decimal:
-        """Set the cash balance for an account to a specific value (quantized).
-
-        Returns the new balance.
-
-        Raises:
-            KeyError: If the account does not exist.
-            ValueError: If new_balance cannot be converted to a valid cash amount.
-        """
+    def update_balance(self, account_id: str, delta: NumberLike) -> Decimal:
+        """Add a delta to the account balance and return the new balance."""
+        acc_id = self._normalize_id(account_id)
+        d = self._coerce_decimal(delta)
         with self._lock:
-            acct = self._get_account(account_id)
-            acct.cash_balance = self._to_cash(new_balance)
-            return acct.cash_balance
-
-    def adjust_cash(self, account_id: str, delta: Number) -> Decimal:
-        """Adjust the cash balance by a delta (can be positive or negative).
-
-        Returns the new balance.
-
-        Raises:
-            KeyError: If the account does not exist.
-            ValueError: If delta cannot be converted to a valid cash amount.
-        """
-        with self._lock:
-            acct = self._get_account(account_id)
-            new_bal = (acct.cash_balance + self._to_cash(delta)).quantize(self._cash_q, rounding=self._rounding)
-            acct.cash_balance = new_bal
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            new_bal = self._accounts[acc_id] + d
+            self._accounts[acc_id] = new_bal
             return new_bal
 
-    # ---------------------------- Holdings APIs ---------------------------
-    def get_positions(self, account_id: str) -> Dict[str, Decimal]:
-        """Return a shallow copy of symbol -> quantity positions for the account.
+    def list_accounts(self) -> List[AccountSnapshot]:
+        """List all accounts as immutable snapshots."""
+        with self._lock:
+            return [AccountSnapshot(id=k, balance=v) for k, v in self._accounts.items()]
+
+    # -----------------------------
+    # Holdings storage operations
+    # -----------------------------
+
+    def get_holdings(self, account_id: str) -> Dict[str, Decimal]:
+        """Return a snapshot of holdings for the given account.
 
         Raises:
-            KeyError: If the account does not exist.
+            StorageValidationError: If account_id is invalid.
+            RecordNotFoundError: If the account does not exist.
         """
+        acc_id = self._normalize_id(account_id)
         with self._lock:
-            self._ensure_account_exists(account_id)
-            return dict(self._holdings.get(account_id, {}))
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            return dict(self._holdings.get(acc_id, {}))
 
     def get_position(self, account_id: str, symbol: str) -> Decimal:
-        """Return the position size for a symbol (zero if none).
-
-        Raises:
-            KeyError: If the account does not exist.
-        """
+        """Get the quantity held for a specific symbol; returns Decimal(0) if none."""
+        acc_id = self._normalize_id(account_id)
+        sym = self._normalize_symbol(symbol)
         with self._lock:
-            self._ensure_account_exists(account_id)
-            sym = self._normalize_symbol(symbol)
-            return self._holdings[account_id].get(sym, Decimal(0))
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            return self._holdings.get(acc_id, {}).get(sym, Decimal(0))
 
-    def set_position(self, account_id: str, symbol: str, quantity: Number) -> Decimal:
-        """Set the position for a symbol to an exact quantity (quantized).
+    def set_position(self, account_id: str, symbol: str, quantity: NumberLike) -> Decimal:
+        """Set the position quantity for a symbol, replacing any existing value.
 
-        Quantity of zero removes the symbol from holdings. Returns the new position quantity.
+        If the quantity is zero, the position is removed from the account holdings.
 
-        Raises:
-            KeyError: If the account does not exist.
-            ValueError: If the quantity cannot be converted to a valid number.
+        Returns:
+            The stored quantity as Decimal.
         """
+        acc_id = self._normalize_id(account_id)
+        sym = self._normalize_symbol(symbol)
+        qty = self._coerce_decimal(quantity)
         with self._lock:
-            self._ensure_account_exists(account_id)
-            sym = self._normalize_symbol(symbol)
-            qty = self._to_qty(quantity)
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            acct_pos = self._holdings.setdefault(acc_id, {})
             if qty == Decimal(0):
-                self._holdings[account_id].pop(sym, None)
+                acct_pos.pop(sym, None)
+                # clean empty map
+                if not acct_pos:
+                    self._holdings.pop(acc_id, None)
                 return Decimal(0)
-            self._holdings[account_id][sym] = qty
+            acct_pos[sym] = qty
             return qty
 
-    def adjust_position(self, account_id: str, symbol: str, delta: Number) -> Decimal:
-        """Adjust the position for a symbol by delta (can be positive or negative).
-
-        If the resulting position is zero, the symbol is removed from holdings.
-        Returns the new position quantity.
-
-        Raises:
-            KeyError: If the account does not exist.
-            ValueError: If the delta cannot be converted to a valid number.
-        """
+    def adjust_position(self, account_id: str, symbol: str, delta: NumberLike) -> Decimal:
+        """Adjust the position quantity for a symbol by a delta and return the new quantity."""
+        acc_id = self._normalize_id(account_id)
+        sym = self._normalize_symbol(symbol)
+        d = self._coerce_decimal(delta)
         with self._lock:
-            self._ensure_account_exists(account_id)
-            sym = self._normalize_symbol(symbol)
-            curr = self._holdings[account_id].get(sym, Decimal(0))
-            new_qty = (curr + self._to_qty(delta)).quantize(self._qty_q, rounding=self._rounding)
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            acct_pos = self._holdings.setdefault(acc_id, {})
+            cur = acct_pos.get(sym, Decimal(0))
+            new_qty = cur + d
             if new_qty == Decimal(0):
-                self._holdings[account_id].pop(sym, None)
+                acct_pos.pop(sym, None)
+                if not acct_pos:
+                    self._holdings.pop(acc_id, None)
                 return Decimal(0)
-            self._holdings[account_id][sym] = new_qty
+            acct_pos[sym] = new_qty
             return new_qty
 
-    # --------------------------- Transactions APIs ------------------------
-    def record_transaction(
+    # -----------------------------
+    # Transaction storage operations
+    # -----------------------------
+
+    def add_transaction(
         self,
         *,
         account_id: str,
-        type: str,
-        amount: Number,
+        kind: str,
+        amount: NumberLike,
         symbol: Optional[str] = None,
-        quantity: Optional[Number] = None,
-        price: Optional[Number] = None,
-        balance_after: Optional[Number] = None,
-        position_after: Optional[Number] = None,
-        memo: Optional[str] = None,
-    ) -> Transaction:
-        """Record a transaction entry for an account.
+        quantity: Optional[NumberLike] = None,
+        price: Optional[NumberLike] = None,
+        total: Optional[NumberLike] = None,
+        timestamp: Optional[datetime] = None,
+        txn_id: Optional[str] = None,
+    ) -> str:
+        """Append a new transaction record and return its ID.
 
-        Notes:
-            - `type` is stored verbatim (after stripping/lowercasing); callers can use any label
-              such as 'deposit', 'withdrawal', 'buy', 'sell', or domain-specific tags.
-            - Monetary and quantity fields are quantized to the store's configured precision.
-
-        Raises:
-            KeyError: If the account does not exist.
-            ValueError: If numeric fields cannot be converted to Decimal.
+        This method performs basic validation and normalization but does not apply
+        any business rules (e.g., sign of amounts, sufficiency checks).
         """
+        acc_id = self._normalize_id(account_id)
+        k = self._normalize_kind(kind)
+        amt = self._coerce_decimal(amount)
+        sym: Optional[str] = None
+        qty: Optional[Decimal] = None
+        px: Optional[Decimal] = None
+        ttl: Optional[Decimal] = None
+
+        if symbol is not None:
+            sym = self._normalize_symbol(symbol)
+        if quantity is not None:
+            qty = self._coerce_decimal(quantity)
+        if price is not None:
+            px = self._coerce_decimal(price)
+        if total is not None:
+            ttl = self._coerce_decimal(total)
+
+        ts = timestamp if timestamp is not None else datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            # Ensure timezone-aware UTC timestamp
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        tid = txn_id if txn_id is not None else uuid4().hex
+
         with self._lock:
-            self._ensure_account_exists(account_id)
-            t_type = (type or "").strip().lower()
-            sym = self._normalize_symbol(symbol) if symbol is not None else None
-
-            amt = self._to_cash(amount)
-            qty = self._to_qty(quantity) if quantity is not None else None
-            px = self._to_cash(price) if price is not None else None
-            bal_after = self._to_cash(balance_after) if balance_after is not None else None
-            pos_after = self._to_qty(position_after) if position_after is not None else None
-
-            entry = Transaction(
-                timestamp=datetime.now(timezone.utc),
-                account_id=account_id,
-                type=t_type,
+            if acc_id not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_id}' not found")
+            rec = TransactionRecord(
+                id=tid,
+                account_id=acc_id,
+                kind=k,
+                timestamp=ts,
                 amount=amt,
-                balance_after=bal_after,
                 symbol=sym,
                 quantity=qty,
                 price=px,
-                position_after=pos_after,
-                memo=memo,
+                total=ttl,
             )
-            self._log_transaction(entry)
-            return entry
+            self._transactions.append(rec)
+            return tid
 
-    def get_transactions(self, account_id: Optional[str] = None) -> List[Transaction]:
-        """Retrieve transactions (global or per-account).
+    def list_transactions(
+        self,
+        account_id: Optional[str] = None,
+        *,
+        kind: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> List[TransactionRecord]:
+        """List transactions with optional filtering by account, kind, and symbol."""
+        acc_norm: Optional[str] = None
+        kind_norm: Optional[str] = None
+        sym_norm: Optional[str] = None
 
-        Args:
-            account_id: If provided, returns only transactions for that account.
+        if account_id is not None:
+            acc_norm = self._normalize_id(account_id)
+        if kind is not None:
+            kind_norm = self._normalize_kind(kind)
+        if symbol is not None:
+            sym_norm = self._normalize_symbol(symbol)
 
-        Returns:
-            A new list of Transaction instances in chronological order.
-        """
         with self._lock:
-            if account_id is None:
-                return list(self._transactions)
-            return list(self._per_account_tx.get(account_id, []))
+            # If account filter provided, ensure it exists for clearer semantics
+            if acc_norm is not None and acc_norm not in self._accounts:
+                raise RecordNotFoundError(f"account '{acc_norm}' not found")
 
-    # --------------------------- Atomic operations ------------------------
-    @contextmanager
-    def atomic(self):
-        """Context manager for atomic multi-step updates.
+            result = [
+                t
+                for t in self._transactions
+                if (acc_norm is None or t.account_id == acc_norm)
+                and (kind_norm is None or t.kind == kind_norm)
+                and (sym_norm is None or t.symbol == sym_norm)
+            ]
+            return list(result)
 
-        Usage:
-            with store.atomic():
-                store.adjust_cash(aid, 10)
-                store.adjust_position(aid, "ABC", 1)
-                store.record_transaction(account_id=aid, type="deposit", amount=10, balance_after=store.get_cash_balance(aid))
-        """
-        self._lock.acquire()
-        try:
-            yield self
-        finally:
-            self._lock.release()
+    def get_account_transactions(
+        self,
+        account_id: str,
+        *,
+        kind: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> List[TransactionRecord]:
+        """Convenience wrapper to list transactions for a single account."""
+        return self.list_transactions(account_id=account_id, kind=kind, symbol=symbol)
 
-    def apply(self, func):
-        """Execute a callable under the store lock and return its result.
+    # -----------------------------
+    # Internal helpers
+    # -----------------------------
 
-        This is a convenience for atomic read-modify-write operations.
-        """
-        with self._lock:
-            return func(self)
-
-    # ------------------------------ Internals -----------------------------
-    def _get_account(self, account_id: str) -> Account:
-        acct = self._accounts.get(account_id)
-        if acct is None:
-            raise KeyError(f"Account '{account_id}' not found")
-        return acct
-
-    def _ensure_account_exists(self, account_id: str) -> None:
-        if account_id not in self._accounts:
-            raise KeyError(f"Account '{account_id}' not found")
-
-    def _log_transaction(self, entry: Transaction) -> None:
-        self._transactions.append(entry)
-        self._per_account_tx.setdefault(entry.account_id, []).append(entry)
+    def _normalize_id(self, account_id: str) -> str:
+        if not isinstance(account_id, str):
+            raise StorageValidationError("account_id must be a string")
+        acc_id = account_id.strip()
+        if not acc_id:
+            raise StorageValidationError("account_id must be a non-empty string")
+        return acc_id
 
     def _normalize_symbol(self, symbol: str) -> str:
-        s = (symbol or "").strip()
-        if not s:
-            raise ValueError("symbol must be a non-empty string")
-        return s
+        if not isinstance(symbol, str):
+            raise StorageValidationError("symbol must be a string")
+        sym = symbol.strip()
+        if not sym:
+            raise StorageValidationError("symbol must be a non-empty string")
+        return sym.upper()
 
-    # Converters
-    def _to_cash(self, value: Number) -> Decimal:
+    def _normalize_kind(self, kind: str) -> str:
+        if not isinstance(kind, str):
+            raise StorageValidationError("kind must be a string")
+        k = kind.strip().upper()
+        if k not in {"DEPOSIT", "WITHDRAWAL", "BUY", "SELL"}:
+            raise StorageValidationError("kind must be one of: DEPOSIT, WITHDRAWAL, BUY, SELL")
+        return k
+
+    def _coerce_decimal(self, value: NumberLike) -> Decimal:
         try:
             if isinstance(value, Decimal):
-                dec = value
+                d = value
             elif isinstance(value, int):
-                dec = Decimal(value)
+                d = Decimal(value)
             elif isinstance(value, float):
-                dec = Decimal(str(value))
+                d = Decimal(str(value))
             elif isinstance(value, str):
-                dec = Decimal(value)
+                d = Decimal(value.strip())
             else:
-                raise ValueError(f"unsupported cash type: {type(value)!r}")
-            return dec.quantize(self._cash_q, rounding=self._rounding)
+                raise StorageValidationError(
+                    "value must be a number-like type (int, float, str, Decimal)"
+                )
         except (InvalidOperation, ValueError) as exc:
-            raise ValueError("invalid cash amount") from exc
+            raise StorageValidationError("value is not a valid number") from exc
 
-    def _to_qty(self, value: Number) -> Decimal:
-        try:
-            if isinstance(value, Decimal):
-                dec = value
-            elif isinstance(value, int):
-                dec = Decimal(value)
-            elif isinstance(value, float):
-                dec = Decimal(str(value))
-            elif isinstance(value, str):
-                dec = Decimal(value)
-            else:
-                raise ValueError(f"unsupported quantity type: {type(value)!r}")
-            return dec.quantize(self._qty_q, rounding=self._rounding)
-        except (InvalidOperation, ValueError) as exc:
-            raise ValueError("invalid quantity amount") from exc
+        if not d.is_finite():
+            raise StorageValidationError("value must be a finite number")
+        return d

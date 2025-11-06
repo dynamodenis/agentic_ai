@@ -1,302 +1,258 @@
+import re
 import threading
 from dataclasses import FrozenInstanceError
 from datetime import timezone
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import Decimal
 
 import pytest
 
-from output.backend.transactions import (
+from output/backend.accounts import (
+    AccountService,
+    ValidationError as AccountValidationError,
+    AccountNotFoundError,
+)
+from output/backend.transactions import (
     TransactionLedger,
-    InvalidTransactionError,
-    TransactionEntry,
+    Transaction,
+    TransactionValidationError,
 )
 
 
-def test_record_deposit_and_withdrawal_basic_and_quantization():
-    ledger = TransactionLedger()
-    # Deposit
-    dep = ledger.record_deposit("A1", 10, balance_after=10, memo="dep")
-    assert isinstance(dep, TransactionEntry)
-    assert dep.type == "deposit"
-    assert dep.account_id == "A1"
-    assert dep.amount == Decimal("10.00")
-    assert dep.balance_after == Decimal("10.00")
-    assert dep.memo == "dep"
-    assert dep.timestamp.tzinfo == timezone.utc
-
-    # Withdrawal
-    wd = ledger.record_withdrawal("A1", "0.3", balance_after="9.70", memo="wd")
-    assert wd.type == "withdrawal"
-    assert wd.amount == Decimal("0.30")
-    assert wd.balance_after == Decimal("9.70")
-    assert wd.memo == "wd"
-    assert wd.timestamp.tzinfo == timezone.utc
-
-    # Per-account transactions
-    per = ledger.get_transactions("A1")
-    assert [e.type for e in per] == ["deposit", "withdrawal"]
-    assert all(isinstance(e, TransactionEntry) for e in per)
-
-    # Global transactions
-    glob = ledger.get_transactions()
-    assert len(glob) == 2
-
-    # Returned lists are copies
-    orig_len_global = len(glob)
-    orig_len_per = len(per)
-    glob.append("tamper")
-    per.append("tamper")
-    assert len(ledger.get_transactions()) == orig_len_global
-    assert len(ledger.get_transactions("A1")) == orig_len_per
+UUID4_HEX_RE = re.compile(r"[0-9a-f]{32}")
 
 
-def test_deposit_invalid_amounts_and_rounding_to_zero_rejected():
+def is_uuid4_hex(s: str) -> bool:
+    return bool(UUID4_HEX_RE.fullmatch(s))
+
+
+def test_record_deposit_and_withdrawal_happy_path_and_immutability():
     ledger = TransactionLedger()
 
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_deposit("A", 0)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_deposit("A", -1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_deposit("A", "n/a")
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_deposit("A", {"bad": "type"})  # unsupported
+    # Deposit with trimming and quantization (100.005 -> 100.01)
+    t_dep = ledger.record_deposit("  acc1  ", "100.005")
+    assert isinstance(t_dep, Transaction)
+    assert is_uuid4_hex(t_dep.id)
+    assert t_dep.timestamp.tzinfo == timezone.utc
+    assert t_dep.account_id == "acc1"
+    assert t_dep.kind == "DEPOSIT"
+    assert t_dep.amount == Decimal("100.01")
+    assert t_dep.symbol is None and t_dep.quantity is None and t_dep.price is None and t_dep.total is None
 
-    # HALF_EVEN at 2 dp: 0.005 -> 0.00, which is invalid (not strictly positive)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_deposit("A", Decimal("0.005"))
+    # Withdrawal with integer amount -> negative cash outflow
+    t_wdr = ledger.record_withdrawal("acc1", 2)
+    assert t_wdr.kind == "WITHDRAWAL"
+    assert t_wdr.amount == Decimal("-2.00")
+    assert t_wdr.symbol is None and t_wdr.quantity is None and t_wdr.price is None and t_wdr.total is None
 
-
-def test_withdrawal_invalid_amounts():
-    ledger = TransactionLedger()
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_withdrawal("A", 0)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_withdrawal("A", -0.01)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_withdrawal("A", "bad")
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_withdrawal("A", {"bad": "type"})
+    # Transaction dataclass is immutable
+    with pytest.raises(FrozenInstanceError):
+        t_dep.amount = Decimal("0")  # type: ignore[misc]
 
 
-def test_record_buy_and_sell_normal_and_fields():
+def test_record_buy_and_sell_fields_and_quantization():
     ledger = TransactionLedger()
 
-    # BUY 0.5 @ 100 -> total 50.00
-    buy = ledger.record_buy(
-        "ACC",
-        " BTC ",
-        Decimal("0.5"),
-        100,
-        cash_balance_after=50,
-        position_after="0.5",
-        memo="first buy",
-    )
-    assert isinstance(buy, TransactionEntry)
-    assert buy.type == "buy"
-    assert buy.symbol == "BTC"  # stripped
-    assert buy.quantity == Decimal("0.50000000")
-    assert buy.price == Decimal("100.00")
-    assert buy.amount == Decimal("50.00")
-    assert buy.balance_after == Decimal("50.00")
-    assert buy.position_after == Decimal("0.50000000")
-    assert buy.memo == "first buy"
-    assert buy.timestamp.tzinfo == timezone.utc
+    # Buy: symbol normalization, quantity/price quantization, total and negative amount
+    t_buy = ledger.record_buy("acc2", "  eth  ", quantity="0.123456789", price="100.005")
+    assert isinstance(t_buy, Transaction)
+    assert is_uuid4_hex(t_buy.id)
+    assert t_buy.timestamp.tzinfo == timezone.utc
+    assert t_buy.account_id == "acc2"
+    assert t_buy.kind == "BUY"
+    assert t_buy.symbol == "ETH"
+    assert t_buy.quantity == Decimal("0.12345679")
+    assert t_buy.price == Decimal("100.01")
+    assert t_buy.total == Decimal("12.35")
+    assert t_buy.amount == Decimal("-12.35")
 
-    # SELL 0.1 @ 150 -> total 15.00
-    sell = ledger.record_sell(
-        "ACC",
-        "BTC",
-        "0.1",
-        "150",
-        cash_balance_after=65,
-        position_after=0.4,
-        memo="partial sell",
-    )
-    assert sell.type == "sell"
-    assert sell.symbol == "BTC"
-    assert sell.quantity == Decimal("0.10000000")
-    assert sell.price == Decimal("150.00")
-    assert sell.amount == Decimal("15.00")
-    assert sell.balance_after == Decimal("65.00")
-    assert sell.position_after == Decimal("0.40000000")
-    assert sell.memo == "partial sell"
-
-    # Per-account transactions sequence
-    per = ledger.get_transactions("ACC")
-    assert [e.type for e in per] == ["buy", "sell"]
+    # Sell: positive amount, symbol preserved uppercase; use small values that still quantize > 0
+    t_sell = ledger.record_sell(" acc2 ", "ETH", quantity="0.01", price="0.5")
+    assert t_sell.account_id == "acc2"
+    assert t_sell.kind == "SELL"
+    assert t_sell.symbol == "ETH"
+    assert t_sell.quantity == Decimal("0.01")
+    assert t_sell.price == Decimal("0.50")
+    assert t_sell.total == Decimal("0.01")
+    assert t_sell.amount == Decimal("0.01")
+    assert t_sell.timestamp.tzinfo == timezone.utc
 
 
-def test_record_trade_optional_fields_none_preserved():
-    ledger = TransactionLedger()
-    # Omit cash_balance_after and position_after
-    rec = ledger.record_buy("A", "ABC", 1, 1)
-    assert rec.balance_after is None
-    assert rec.position_after is None
-
-
-def test_record_trade_invalid_params_and_quantization_edge_to_zero():
+def test_invalid_inputs_validation_errors_for_id_symbol_amount_quantity_price():
     ledger = TransactionLedger()
 
-    # Invalid symbol
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "", 1, 1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "   ", 1, 1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", None, 1, 1)  # type: ignore[arg-type]
+    # account_id validation
+    with pytest.raises(TransactionValidationError):
+        ledger.record_deposit(123, 1)  # type: ignore[arg-type]
+    with pytest.raises(TransactionValidationError):
+        ledger.record_deposit("   ", 1)
 
-    # Invalid quantity
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", 0, 1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", -1, 1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", "n/a", 1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", {"bad": "type"}, 1)
-    # Quantizes to zero -> invalid
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", Decimal("0.000000004"), 1)
+    # symbol validation
+    with pytest.raises(TransactionValidationError):
+        ledger.record_buy("a", 123, 1, 1)  # type: ignore[arg-type]
+    with pytest.raises(TransactionValidationError):
+        ledger.record_buy("a", "   ", 1, 1)
 
-    # Invalid price
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", 1, 0)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", 1, -1)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", 1, "bad")
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", 1, {"bad": "type"})
-    # Quantizes to zero -> invalid (HALF_EVEN)
-    with pytest.raises(InvalidTransactionError):
-        ledger.record_buy("A", "ABC", 1, Decimal("0.005"))
+    # Amount must be > 0 after quantization
+    with pytest.raises(TransactionValidationError) as e1:
+        ledger.record_deposit("a", 0)
+    assert "amount must be > 0" in str(e1.value)
+
+    with pytest.raises(TransactionValidationError) as e2:
+        ledger.record_withdrawal("a", "0.004")  # quantizes to 0.00
+    assert "amount must be > 0" in str(e2.value)
+
+    # Quantity and price must be > 0 after quantization
+    with pytest.raises(TransactionValidationError) as eq:
+        ledger.record_buy("a", "ABC", quantity="0.000000004", price=1)
+    assert "quantity must be > 0" in str(eq.value)
+
+    with pytest.raises(TransactionValidationError) as ep:
+        ledger.record_buy("a", "ABC", quantity=1, price="0.004")
+    assert "price must be > 0" in str(ep.value)
+
+    # Non-finite and non-numeric values
+    with pytest.raises(TransactionValidationError) as efin:
+        ledger.record_deposit("a", "NaN")
+    assert "value must be a finite number" in str(efin.value)
+
+    with pytest.raises(TransactionValidationError) as einv:
+        ledger.record_deposit("a", "abc")
+    assert "value is not a valid number" in str(einv.value)
+
+    # Invalid kind filter
+    with pytest.raises(TransactionValidationError):
+        ledger.list_transactions(kind="DIVIDEND")
+
+    # Invalid kind or symbol types in filters
+    with pytest.raises(TransactionValidationError):
+        ledger.list_transactions(kind=123)  # type: ignore[arg-type]
+    with pytest.raises(TransactionValidationError):
+        ledger.list_transactions(symbol=123)  # type: ignore[arg-type]
 
 
-def test_get_transactions_unknown_account_returns_empty_and_global_order_timezone():
+def test_list_transactions_filters_by_account_kind_and_symbol_and_convenience_method():
     ledger = TransactionLedger()
+    # Populate transactions
+    t1 = ledger.record_deposit("a1", 10)
+    t2 = ledger.record_withdrawal("a1", 2)
+    t3 = ledger.record_buy("a1", "BTC", 1, 5)
+    t4 = ledger.record_sell("a1", "ETH", 2, 3)
+    t5 = ledger.record_buy("a2", "ETH", 1, 1)
+    t6 = ledger.record_deposit("a2", 7)
 
-    ledger.record_deposit("X", 1)
-    ledger.record_buy("X", "AAA", 1, 2)
-    ledger.record_withdrawal("Y", 0.5)
-    ledger.record_sell("Y", "BBB", 1, 3)
+    all_txns = ledger.list_transactions()
+    assert {t.id for t in all_txns} == {t1.id, t2.id, t3.id, t4.id, t5.id, t6.id}
 
-    # Unknown account -> empty list (no exception)
-    assert ledger.get_transactions("UNKNOWN") == []
+    # Filter by kind (case-insensitive)
+    a1_deposits = ledger.list_transactions(account_id="a1", kind="deposit")
+    assert [t.kind for t in a1_deposits] == ["DEPOSIT"]
+    assert a1_deposits[0].id == t1.id
 
-    # Global ordering and timezone
-    glob = ledger.get_transactions()
-    types = [e.type for e in glob]
-    assert types == ["deposit", "buy", "withdrawal", "sell"]
+    # Filter by symbol (case-insensitive); only BUY/SELL have symbols
+    eth_txns = ledger.list_transactions(symbol="eth")
+    assert {t.id for t in eth_txns} == {t4.id, t5.id}
 
-    timestamps = [e.timestamp for e in glob]
-    assert all(ts.tzinfo == timezone.utc for ts in timestamps)
-    assert timestamps == sorted(timestamps)
+    # Combined filters
+    a1_buys = ledger.list_transactions(account_id="  a1  ", kind="BUY")
+    assert [t.id for t in a1_buys] == [t3.id]
+
+    # Convenience wrapper returns same as list_transactions with account_id
+    assert ledger.get_account_transactions("a1", kind="BUY") == a1_buys
 
 
-def test_constructor_decimal_places_validation_and_zero_places_behavior():
-    with pytest.raises(ValueError):
-        TransactionLedger(cash_decimal_places=-1)
-    with pytest.raises(ValueError):
-        TransactionLedger(qty_decimal_places=-1)
+def test_constructor_invalid_parameters_raise():
+    with pytest.raises(TransactionValidationError):
+        TransactionLedger(currency_precision=-1)
+    with pytest.raises(TransactionValidationError):
+        TransactionLedger(asset_precision=-1)
+    with pytest.raises(TransactionValidationError):
+        TransactionLedger(currency_precision=1.5)  # type: ignore[arg-type]
+    with pytest.raises(TransactionValidationError):
+        TransactionLedger(asset_precision="2")  # type: ignore[arg-type]
 
-    # Zero decimal places for cash
-    ledger_cash0 = TransactionLedger(cash_decimal_places=0)
-    dep = ledger_cash0.record_deposit("A", 1.2)
+
+def test_account_validation_when_account_service_is_provided_and_filter_validates():
+    acct = AccountService()
+    acc_id = acct.create_account("accv", initial_balance=0)
+    ledger = TransactionLedger(account_service=acct)
+
+    # Valid account works
+    dep = ledger.record_deposit(acc_id, 1)
+    assert dep.account_id == "accv"
+
+    # Non-existent account should raise AccountNotFoundError (delegated)
+    with pytest.raises(AccountNotFoundError):
+        ledger.record_deposit("missing", 1)
+
+    with pytest.raises(AccountNotFoundError):
+        ledger.list_transactions(account_id="missing")
+
+    # Invalid account id format triggers TransactionValidationError before delegation
+    with pytest.raises(TransactionValidationError):
+        ledger.record_deposit("   ", 1)
+    with pytest.raises(TransactionValidationError):
+        ledger.list_transactions(account_id="   ")
+
+    # Without AccountService, list_transactions should not validate existence
+    ledger_noacct = TransactionLedger()
+    assert ledger_noacct.list_transactions(account_id="missing") == []
+
+
+def test_precision_configuration_and_rounding_behavior():
+    # Custom precisions: asset=2, currency=0
+    ledger = TransactionLedger(currency_precision=0, asset_precision=2)
+
+    # Deposit 0.4 -> quantizes to 0 -> invalid; 0.5 -> rounds to 1
+    with pytest.raises(TransactionValidationError):
+        ledger.record_deposit("p", 0.4)
+    dep = ledger.record_deposit("p", 0.5)
     assert dep.amount == Decimal("1")
 
-    # Zero decimal places for quantity
-    ledger_qty0 = TransactionLedger(qty_decimal_places=0)
-    buy = ledger_qty0.record_buy("A", "ABC", 1.7, 2.3)
-    assert buy.quantity == Decimal("2")  # 1.7 -> 2 with HALF_EVEN
-    assert buy.price == Decimal("2.30")  # default cash places = 2
+    # Buy: quantity -> 1.23, price -> 6, total -> 7, amount -7
+    buy = ledger.record_buy("p", "XRP", quantity="1.234", price="5.5")
+    assert buy.quantity == Decimal("1.23")
+    assert buy.price == Decimal("6")
+    assert buy.total == Decimal("7")
+    assert buy.amount == Decimal("-7")
 
 
-def test_transaction_entry_immutable():
+def test_thread_safety_concurrent_records_and_counts_and_amounts():
     ledger = TransactionLedger()
-    rec = ledger.record_deposit("A", 1)
-    assert isinstance(rec, TransactionEntry)
-    with pytest.raises(FrozenInstanceError):
-        rec.type = "hacked"
-
-
-def test_concurrent_records_thread_safety():
-    ledger = TransactionLedger()
-    aid = "acct"
-    deposits_per_thread = 50
-    threads = []
-    amount = Decimal("0.01")
-    thread_count = 5
+    acc = "thread"
+    qty = Decimal("0.01")
+    price = Decimal("1.00")  # per-trade total 0.01 -> amount -0.01
+    per_thread = 200
+    n_threads = 5
 
     def worker():
-        for _ in range(deposits_per_thread):
-            ledger.record_deposit(aid, amount)
+        for _ in range(per_thread):
+            ledger.record_buy(acc, "XYZ", quantity=qty, price=price)
 
-    for _ in range(thread_count):
-        t = threading.Thread(target=worker)
-        threads.append(t)
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
         t.start()
-
     for t in threads:
         t.join()
 
-    per = ledger.get_transactions(aid)
-    assert len(per) == deposits_per_thread * thread_count
-    assert all(e.type == "deposit" and e.amount == Decimal("0.01") for e in per)
+    total_trades = per_thread * n_threads
+    acc_buys = ledger.list_transactions(account_id=acc, kind="BUY")
+    assert len(acc_buys) == total_trades
 
-    # Global should have same count since we only posted for this account
-    glob = ledger.get_transactions()
-    assert len(glob) == len(per)
+    total_amount = sum((t.amount for t in acc_buys), Decimal(0))
+    expected_amount = Decimal("-0.01") * total_trades
+    assert total_amount == expected_amount
 
 
-def test_float_handling_in_inputs():
+def test_list_transactions_symbol_filter_normalization_and_kind_validation():
     ledger = TransactionLedger()
+    ledger.record_buy("a", " eth ", 1, 1)
+    ledger.record_sell("a", "ETH", 1, 1)
 
-    # Deposit float 0.1 -> 0.10
-    dep = ledger.record_deposit("A", 0.1)
-    assert dep.amount == Decimal("0.10")
+    # symbol filter normalizes whitespace and case
+    eth_filtered = ledger.list_transactions(symbol="  eTh  ")
+    assert len(eth_filtered) == 2
+    assert {t.kind for t in eth_filtered} == {"BUY", "SELL"}
 
-    # Trade with float price/qty
-    rec = ledger.record_buy("A", "XYZ", 0.25, 0.1)
-    assert rec.quantity == Decimal("0.25000000")
-    assert rec.price == Decimal("0.10")
-    assert rec.amount == Decimal("0.02")  # 0.25 * 0.10 -> 0.025 -> 0.02 (banker's rounding)
-
-
-def test_balance_and_position_after_quantization():
-    ledger = TransactionLedger()
-
-    # Deposit: balance_after quantized
-    dep = ledger.record_deposit("A", 1, balance_after=1.234, memo="test")
-    assert dep.balance_after == Decimal("1.23")
-    assert dep.memo == "test"
-
-    # Buy: cash and position after quantized
-    buy = ledger.record_buy("A", "ABC", 1, 1, cash_balance_after=9.876, position_after=0.123456789)
-    assert buy.balance_after == Decimal("9.88")
-    assert buy.position_after == Decimal("0.12345679")
-
-
-def test_per_account_isolated_and_copies():
-    ledger = TransactionLedger()
-    a1 = "A1"
-    a2 = "A2"
-
-    ledger.record_deposit(a1, 1)
-    ledger.record_buy(a1, "AAA", 1, 1)
-    ledger.record_deposit(a2, 2)
-    ledger.record_sell(a2, "BBB", 1, 1)
-
-    per1 = ledger.get_transactions(a1)
-    per2 = ledger.get_transactions(a2)
-
-    assert [e.type for e in per1] == ["deposit", "buy"]
-    assert [e.type for e in per2] == ["deposit", "sell"]
-
-    # Copies
-    per1_len = len(per1)
-    per2_len = len(per2)
-    per1.append("tamper")
-    per2.append("tamper")
-    assert len(ledger.get_transactions(a1)) == per1_len
-    assert len(ledger.get_transactions(a2)) == per2_len
+    # invalid kind values
+    with pytest.raises(TransactionValidationError):
+        ledger.list_transactions(kind="hold")

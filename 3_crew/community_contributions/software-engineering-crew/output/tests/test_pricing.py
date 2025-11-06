@@ -1,50 +1,47 @@
 import pytest
 from decimal import Decimal
 
-from output.backend.pricing import PricingService
+from output/backend/pricing import PriceService, PricingError, SymbolNotSupportedError
 
 
-def test_get_share_price_known_symbols_returns_decimal():
-    svc = PricingService()
+def test_get_share_price_supported_symbols_case_insensitive_and_trimmed():
+    svc = PriceService()
 
-    price_aapl = svc.get_share_price("AAPL")
-    price_tsla = svc.get_share_price("TSLA")
-    price_googl = svc.get_share_price("GOOGL")
+    # Exact symbols
+    assert svc.get_share_price("AAPL") == Decimal("150.00")
+    assert svc.get_share_price("TSLA") == Decimal("250.00")
+    assert svc.get_share_price("GOOGL") == Decimal("2750.00")
 
-    assert isinstance(price_aapl, Decimal)
-    assert isinstance(price_tsla, Decimal)
-    assert isinstance(price_googl, Decimal)
-
-    assert price_aapl == Decimal("190.00")
-    assert price_tsla == Decimal("250.00")
-    assert price_googl == Decimal("140.00")
+    # Case-insensitive and whitespace trimming
+    assert svc.get_share_price("  aapl  ") == Decimal("150.00")
+    assert svc.get_share_price("tsla") == Decimal("250.00")
+    assert svc.get_share_price("  GooGl ") == Decimal("2750.00")
 
 
-def test_get_share_price_is_case_insensitive_and_strips_whitespace():
-    svc = PricingService()
+def test_get_share_price_returns_decimal_with_two_decimal_places():
+    svc = PriceService()
+    for sym in ("AAPL", "TSLA", "GOOGL"):
+        price = svc.get_share_price(sym)
+        assert isinstance(price, Decimal)
+        # Ensure two decimal places
+        assert price.as_tuple().exponent == -2
 
-    # Lower/upper/mixed case and surrounding whitespace should be accepted
-    assert svc.get_share_price("aapl") == Decimal("190.00")
-    assert svc.get_share_price(" TsLa ") == Decimal("250.00")
-    assert svc.get_share_price("  googl  ") == Decimal("140.00")
 
+def test_get_share_price_invalid_symbol_input_raises_pricing_error():
+    svc = PriceService()
 
-def test_get_share_price_empty_or_whitespace_or_none_raises_value_error():
-    svc = PricingService()
+    with pytest.raises(PricingError) as e_type:
+        svc.get_share_price(123)  # type: ignore[arg-type]
+    assert "symbol must be a string" in str(e_type.value)
 
-    with pytest.raises(ValueError):
-        svc.get_share_price("")
-    with pytest.raises(ValueError):
+    with pytest.raises(PricingError) as e_empty:
         svc.get_share_price("   ")
-    # None is treated as empty via (symbol or "")
-    with pytest.raises(ValueError):
-        svc.get_share_price(None)  # type: ignore[arg-type]
+    assert "symbol must be a non-empty string" in str(e_empty.value)
 
 
-def test_get_share_price_unknown_symbol_raises_key_error_with_uppercased_symbol():
-    svc = PricingService()
-
-    with pytest.raises(KeyError) as excinfo:
-        svc.get_share_price("msft")  # unknown, should normalize to MSFT in message
-    # The message should include the uppercased symbol
-    assert "MSFT" in excinfo.value.args[0]
+def test_get_share_price_unsupported_symbol_raises_symbol_not_supported_error():
+    svc = PriceService()
+    with pytest.raises(SymbolNotSupportedError) as e_unsup:
+        svc.get_share_price("MSFT")
+    # Error message includes normalized uppercase symbol
+    assert "symbol 'MSFT' is not supported" in str(e_unsup.value)

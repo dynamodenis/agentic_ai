@@ -1,47 +1,68 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Dict
+
+__all__ = [
+    "PricingError",
+    "SymbolNotSupportedError",
+    "PriceService",
+]
 
 
-class PricingService:
+class PricingError(Exception):
+    """Base exception for pricing-related errors."""
+
+
+class SymbolNotSupportedError(PricingError):
+    """Raised when a requested symbol does not have a configured test price."""
+
+
+class PriceService:
+    """Static price provider for a small set of test equities.
+
+    This service exposes a simple get_share_price(symbol) API that returns a fixed
+    Decimal price for supported symbols. It is intended for use in tests or
+    deterministic environments where external price feeds are not desirable.
+
+    Supported symbols and their fixed prices (USD):
+      - AAPL: 150.00
+      - TSLA: 250.00
+      - GOOGL: 2750.00
+
+    Notes:
+      - Symbols are case-insensitive and normalized to upper-case.
+      - Prices are returned as Decimal with two fractional digits.
     """
-    Simple pricing service that returns fixed test share prices.
 
-    This service exposes get_share_price(symbol) and provides fixed prices for:
-    - AAPL
-    - TSLA
-    - GOOGL
-
-    Prices are returned as Decimal values suitable for financial calculations.
-    """
-
-    def __init__(self) -> None:
-        # Fixed test prices; extend as needed for additional symbols.
-        self._prices = {
-            "AAPL": Decimal("190.00"),
-            "TSLA": Decimal("250.00"),
-            "GOOGL": Decimal("140.00"),
-        }
+    # Fixed test price map
+    _PRICES: Dict[str, Decimal] = {
+        "AAPL": Decimal("150.00"),
+        "TSLA": Decimal("250.00"),
+        "GOOGL": Decimal("2750.00"),
+    }
 
     def get_share_price(self, symbol: str) -> Decimal:
-        """
-        Return the share price for the given symbol.
+        """Return the fixed test price for the given equity symbol.
 
         Args:
-            symbol: Stock ticker symbol (case-insensitive; e.g., 'AAPL').
+            symbol: The equity ticker symbol (e.g., "AAPL", "TSLA", "GOOGL").
 
         Returns:
-            Decimal price for the symbol.
+            The price as a Decimal with two decimal places.
 
         Raises:
-            ValueError: If symbol is an empty string or only whitespace.
-            KeyError: If the symbol does not have a configured price.
+            PricingError: If symbol is not a string or empty after trimming.
+            SymbolNotSupportedError: If the symbol is not supported by this service.
         """
-        sym = (symbol or "").strip().upper()
+        if not isinstance(symbol, str):
+            raise PricingError("symbol must be a string")
+        sym = symbol.strip()
         if not sym:
-            raise ValueError("symbol must be a non-empty string")
+            raise PricingError("symbol must be a non-empty string")
+        sym = sym.upper()
 
         try:
-            return self._prices[sym]
+            return self._PRICES[sym]
         except KeyError as exc:
-            raise KeyError(f"Price for symbol '{sym}' not available") from exc
+            raise SymbolNotSupportedError(f"symbol '{sym}' is not supported") from exc
