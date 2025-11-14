@@ -5,6 +5,10 @@ from trading_floor import names, lastnames, short_model_names
 import plotly.express as px
 from accounts import Account
 from database import read_log
+import threading
+from trading_floor import run_every_n_minutes
+import asyncio
+import os
 
 mapper = {
     "trace": Color.WHITE,
@@ -163,7 +167,29 @@ class TraderView:
             self.trader.get_holdings_df(),
             self.trader.get_transactions_df(),
         )
+# --- Add this setup block ---
+MEMORY_DIR = "memory"
+def setup_directories():
+    """Ensures the directory for the libSQL databases exists."""
+    if not os.path.exists(MEMORY_DIR):
+        try:
+            os.makedirs(MEMORY_DIR, exist_ok=True)
+            print(f"Created directory: {MEMORY_DIR}/")
+        except OSError as e:
+            # Important: Log the error if directory creation fails (e.g., due to permissions)
+            print(f"Error creating directory {MEMORY_DIR}: {e}")
+            raise
 
+def start_trading_floor():
+    """Run trading floor in a separate thread"""
+    # 1. Ensure the directory is ready
+    setup_directories() 
+    # 2. Proceed with running the agents
+    asyncio.run(run_every_n_minutes())
+
+# Start trading floor in background thread
+trading_thread = threading.Thread(target=start_trading_floor, daemon=True)
+trading_thread.start()
 
 # Main UI construction
 def create_ui():
