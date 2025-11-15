@@ -1,3 +1,4 @@
+import threading
 from traders import Trader
 from typing import List
 import asyncio
@@ -5,6 +6,7 @@ from tracers import LogTracer
 from agents import add_trace_processor
 from market import is_market_open
 from dotenv import load_dotenv
+from util import stop_event
 import os
 
 load_dotenv(override=True)
@@ -39,14 +41,49 @@ def create_traders() -> List[Trader]:
 
 
 async def run_every_n_minutes():
+    """
+    Runs trading agents every N minutes, cooperatively stopping when signaled.
+    """
     add_trace_processor(LogTracer())
     traders = create_traders()
-    while True:
+    
+    # Create an asyncio Event to link the thread signal to the loop
+    async_stop_event = asyncio.Event()
+
+    # Function to set the asyncio event from the thread's loop
+    def stop_callback():
+        # This function runs in the context of the running asyncio loop
+        if stop_event.is_set():
+            async_stop_event.set()
+        else:
+            # Re-schedule this check if the event hasn't been set
+            loop = asyncio.get_running_loop()
+            loop.call_later(1, stop_callback)
+
+    # Start the periodic check for the threading.Event
+    loop = asyncio.get_running_loop()
+    loop.call_later(1, stop_callback)
+
+    while not async_stop_event.is_set():
         if RUN_EVEN_WHEN_MARKET_IS_CLOSED or is_market_open():
+            print("Running trade cycle...")
+            # Run agents
             await asyncio.gather(*[trader.run() for trader in traders])
         else:
             print("Market is closed, skipping run")
-        await asyncio.sleep(RUN_EVERY_N_MINUTES * 60)
+
+        # Wait for the next interval OR the stop signal
+        try:
+            # Wait for the interval, but be interruptible by async_stop_event.set()
+            await asyncio.wait_for(async_stop_event.wait(), timeout=RUN_EVERY_N_MINUTES * 60)
+        except asyncio.TimeoutError:
+            # Timeout hit, continue to the next iteration
+            continue
+        except Exception:
+            # The async_stop_event was set, or another issue occurred
+            break
+        
+    print("Agent trading loop terminated safely.")
 
 
 if __name__ == "__main__":

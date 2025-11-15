@@ -1,5 +1,9 @@
 from enum import Enum
 
+import threading
+
+stop_event = threading.Event()
+
 css = """
 .positive-pnl {
     color: green !important;

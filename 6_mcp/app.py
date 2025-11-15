@@ -1,3 +1,4 @@
+from hmac import trans_36
 import gradio as gr
 from util import css, js, Color
 import pandas as pd
@@ -7,6 +8,7 @@ from accounts import Account
 from database import read_log
 import threading
 from trading_floor import run_every_n_minutes
+from util import stop_event
 import asyncio
 import os
 
@@ -19,7 +21,6 @@ mapper = {
     "account": Color.RED,
 }
 
-stop_event = threading.Event()
 
 trading_thread = None
 
@@ -183,13 +184,6 @@ def setup_directories():
             print(f"Error creating directory {MEMORY_DIR}: {e}")
             raise
 
-def start_trading_floor():
-    """Run trading floor in a separate thread"""
-    # 1. Ensure the directory is ready
-    setup_directories() 
-    # 2. Proceed with running the agents
-    asyncio.run(run_every_n_minutes())
-
 def stop_trading_thread():
     global trading_thread
 
@@ -213,10 +207,24 @@ def stop_trading_thread():
 def start_trading_floor_and_thread():
     global trading_thread
 
-    # 
-# Start trading floor in background thread
-trading_thread = threading.Thread(target=start_trading_floor, daemon=True)
-trading_thread.start()
+    # check is thead is running
+    if trading_thread is not None and trading_thread.is_alive():
+        return "⚠️ Trading floor is already running."
+
+    # Reset the stop event and create directory
+    stop_event.clear()
+    setup_directories()
+
+    # 3. Define the thread's target function (wrapper to pass the event)
+    def target_wrapper():
+        # The target function now correctly passes the stop_event
+        asyncio.run(run_every_n_minutes())
+
+    # 4. Create and start the thread
+    trading_thread = threading.Thread(target=target_wrapper, daemon=True)
+    trading_thread.start()
+    return "🚀 Trading floor started."
+
 
 # Main UI construction
 def create_ui():
@@ -242,6 +250,19 @@ def create_ui():
 
         # Add Status Output
         thread_status = gr.Textbox(label="Thread Status", value="Ready to start.", interactive=False)
+
+        # Link buttons to functions
+        start_btn.click(
+            fn=start_trading_floor_and_thread, 
+            outputs=[thread_status], 
+            show_progress="hidden"
+        )
+        
+        stop_btn.click(
+            fn=stop_trading_thread, 
+            outputs=[thread_status], 
+            show_progress="hidden"
+        )
 
         with gr.Row():
             for trader_view in trader_views:
