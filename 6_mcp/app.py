@@ -19,6 +19,9 @@ mapper = {
     "account": Color.RED,
 }
 
+stop_event = threading.Event()
+
+trading_thread = None
 
 class Trader:
     def __init__(self, name: str, lastname: str, model_name: str):
@@ -187,6 +190,30 @@ def start_trading_floor():
     # 2. Proceed with running the agents
     asyncio.run(run_every_n_minutes())
 
+def stop_trading_thread():
+    global trading_thread
+
+    if trading_thread is None or not trading_thread.is_alive():
+        return "🛑 Trading floor is not running."
+
+    print("Stopping trading floor...")
+    
+    # 1. Set the stop signal
+    stop_event.set()
+    
+    # 2. Wait for the thread to finish its current task and exit the loop safely
+    trading_thread.join(timeout=10) # Wait up to 10 seconds for graceful exit
+    
+    if trading_thread.is_alive():
+        return "❌ Trading floor thread failed to stop gracefully within 10 seconds."
+    else:
+        trading_thread = None # Clear the variable
+        return "✅ Trading floor stopped successfully."
+
+def start_trading_floor_and_thread():
+    global trading_thread
+
+    # 
 # Start trading floor in background thread
 trading_thread = threading.Thread(target=start_trading_floor, daemon=True)
 trading_thread.start()
@@ -194,6 +221,7 @@ trading_thread.start()
 # Main UI construction
 def create_ui():
     """Create the main Gradio UI for the trading simulation"""
+    print(f"stop event {stop_event.is_set()}")
 
     traders = [
         Trader(trader_name, lastname, model_name)
@@ -201,9 +229,20 @@ def create_ui():
     ]
     trader_views = [TraderView(trader) for trader in traders]
 
+    # stop_btn = gr.Button("Stop Trading Floor", variant="stop")
+    # stop_btn.click(fn=lambda: stop_trading_floor(), inputs=[], outputs=[])
+
     with gr.Blocks(
         title="Traders", css=css, js=js, theme=gr.themes.Default(primary_hue="sky"), fill_width=True
     ) as ui:
+
+        with gr.Row():
+            start_btn = gr.Button("Start Trading Floor 🚀", variant="primary")
+            stop_btn = gr.Button("Stop Trading Floor 🛑", variant="stop")
+
+        # Add Status Output
+        thread_status = gr.Textbox(label="Thread Status", value="Ready to start.", interactive=False)
+
         with gr.Row():
             for trader_view in trader_views:
                 trader_view.make_ui()
