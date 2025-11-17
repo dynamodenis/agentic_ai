@@ -14,6 +14,9 @@ from sidekick_tools import playwright_tools, other_tools
 import uuid
 import asyncio
 from datetime import datetime
+import os
+import PyPDF2
+import docx
 
 load_dotenv(override=True)
 
@@ -206,17 +209,16 @@ class Sidekick:
             # Convert the list of paths to something usable
             file_info = "\nUploaded Files:\n"
             for f in files:
-                # OPen the contents
-                file_info += f"- {f}\n"
-                with open(f, "rb") as file:
-                    data = file.read()
-                
-                file_contents.append({"name": f.split("/")[-1], "data": data})
+                try:
+                    # OPen the contents
+                    content = await self.extract_file_content(f)
+                    file_info += f"--- {os.path.basename(f)} ---\n{content}\n\n"
+                    file_contents.append({"name": os.path.basename(f), "content": content})
+                   
+                except Exception as e:
+                    file_info += f"--- {os.path.basename(f)} ---\n[Error reading file: {str(e)}]\n\n"
 
-
-        full_message = f"{message} {f'Use the provided files {file_contents}' if len(file_contents) > 0 else ''}"
-
-        print(f"full message {full_message}")
+        full_message = f"{message}{file_info}"
 
         state = {
             "messages": full_message,
@@ -229,7 +231,11 @@ class Sidekick:
         user = {"role": "user", "content": full_message}
         reply = {"role": "assistant", "content": result["messages"][-2].content}
         feedback = {"role": "assistant", "content": result["messages"][-1].content}
-        return history + [user, reply, feedback]
+
+        # Limit history to prevent accumulation
+        max_history = 6
+        new_history = (history + [user, reply, feedback])[-max_history:]
+        return new_history
 
     def cleanup(self):
         if self.browser:
@@ -243,3 +249,60 @@ class Sidekick:
                 asyncio.run(self.browser.close())
                 if self.playwright:
                     asyncio.run(self.playwright.stop())
+
+
+    async def extract_file_content(self, file_path):
+        """Extract text content from various file types"""
+        
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        try:
+            if file_ext == '.pdf':
+                return self.extract_pdf_text(file_path)
+            elif file_ext == '.docx':
+                return self.extract_docx_text(file_path)
+            elif file_ext in ['.txt', '.md', '.csv', '.json']:
+                return self.extract_text_file(file_path)
+            else:
+                return f"[Binary file: {os.path.basename(file_path)} - content not readable]"
+        except Exception as e:
+            return f"[Error reading {os.path.basename(file_path)}: {str(e)}]"
+
+    def extract_pdf_text(self, file_path, max_chars=10000):
+        """Extract text from PDF with length limit"""
+        try:
+            with open(file_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                    if len(text) > max_chars:
+                        text = text[:max_chars] + "... [truncated]"
+                        break
+                return text if text else "[No readable text in PDF]"
+        except Exception as e:
+            return f"[PDF read error: {str(e)}]"
+
+    def extract_docx_text(self, file_path, max_chars=10000):
+        """Extract text from DOCX files"""
+        try:
+            doc = docx.Document(file_path)
+            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            if len(text) > max_chars:
+                text = text[:max_chars] + "... [truncated]"
+            return text if text else "[No readable text in DOCX]"
+        except Exception as e:
+            return f"[DOCX read error: {str(e)}]"
+
+    def extract_text_file(self, file_path, max_chars=10000):
+        """Extract text from plain text files"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+                content = file.read(max_chars)
+                if len(content) == max_chars:
+                    content += "... [truncated]"
+                return content
+        except Exception as e:
+            return f"[Text file read error: {str(e)}]"
