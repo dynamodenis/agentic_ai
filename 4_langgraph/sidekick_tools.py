@@ -3,6 +3,8 @@ from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
 from dotenv import load_dotenv
 import os
 import requests
+import subprocess
+import sys
 from langchain.agents import Tool
 from langchain_community.agent_toolkits import FileManagementToolkit
 from langchain_community.tools.wikipedia.tool import WikipediaQueryRun
@@ -18,12 +20,38 @@ pushover_user = os.getenv("PUSHOVER_USER")
 pushover_url = "https://api.pushover.net/1/messages.json"
 serper = GoogleSerperAPIWrapper()
 
-async def playwright_tools():
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=False)
-    toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=browser)
-    return toolkit.get_tools(), browser, playwright
+# async def playwright_tools():
+#     playwright = await async_playwright().start()
 
+#     # subprocess.run(["playwright", "install", "chromium"], check=True)
+
+#     browser = await playwright.chromium.launch(headless=True)
+#     toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=browser)
+#     return toolkit.get_tools(), browser, playwright
+
+async def playwright_tools():
+    try:
+        # from playwright.async_api import async_playwright
+        # import subprocess
+        # import sys
+        
+        # Install dependencies
+        subprocess.run([sys.executable, "-m", "playwright", "install-deps"], capture_output=True)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], capture_output=True)
+        
+        playwright = await async_playwright().start()
+        
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage']
+        )
+        
+        toolkit = PlayWrightBrowserToolkit.from_browser(async_browser=browser)
+        return toolkit.get_tools(), browser, playwright
+        
+    except Exception as e:
+        print(f"Playwright failed, continuing without browser: {e}")
+        return [], None, None
 
 def push(text: str):
     """Send a push notification to the user"""

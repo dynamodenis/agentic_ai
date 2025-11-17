@@ -213,12 +213,8 @@ class Sidekick:
                 
                 file_contents.append({"name": f.split("/")[-1], "data": data})
 
-        
 
-        # print(f"file info {file_contents}")
-        # print(f"message {message}")
-
-        full_message = f"{message} {f'Use the provided files {file_contents}' if len(file_contents) > 0 else ""}"
+        full_message = f"{message} {f'Use the provided files {file_contents}' if len(file_contents) > 0 else ''}"
 
         print(f"full message {full_message}")
 

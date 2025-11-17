@@ -11,3 +11,11 @@ short_description: Autonomous agent with ability to do research and questions
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+# Sidekick Personal Co-Worker
+
+This space hosts the Sidekick agent.
+
+# Setup Script
+```bash
+playwright install
