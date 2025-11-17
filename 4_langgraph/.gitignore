@@ -1,0 +1,15 @@
+# .gitignore
+__pycache__/
+*.pyc
+.venv/
+*.db  # Important: Exclude database files like George.db, Warren.db, accounts.db
+*.txt # Exclude temporary files
+/memory/ # Exclude the entire memory directory if it's large/temporary
+memory.db
+memory.*
+community_contributions/
+
+# Ignore all sqlite DB files
+*.db
+*.db-wal
+*.db-shm

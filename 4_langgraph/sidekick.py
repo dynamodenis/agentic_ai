@@ -1,3 +1,4 @@
+from dis import opmap
 from typing import Annotated
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
@@ -48,7 +49,7 @@ class Sidekick:
     async def setup(self):
         self.tools, self.browser, self.playwright = await playwright_tools()
         self.tools += await other_tools()
-        worker_llm = ChatOpenAI(model="gpt-4o-mini")
+        worker_llm = ChatOpenAI(model="gpt-4.1-mini")
         self.worker_llm_with_tools = worker_llm.bind_tools(self.tools)
         evaluator_llm = ChatOpenAI(model="gpt-4o-mini")
         self.evaluator_llm_with_output = evaluator_llm.with_structured_output(EvaluatorOutput)
@@ -192,18 +193,44 @@ class Sidekick:
         # Compile the graph
         self.graph = graph_builder.compile(checkpointer=self.memory)
 
-    async def run_superstep(self, message, success_criteria, history):
+    async def run_superstep(self, message, success_criteria, history, files):
+
         config = {"configurable": {"thread_id": self.sidekick_id}}
 
+        # files will be a list of filepaths, and contents or None
+        file_info = ""
+        file_contents = []
+
+
+        if files:
+            # Convert the list of paths to something usable
+            file_info = "\nUploaded Files:\n"
+            for f in files:
+                # OPen the contents
+                file_info += f"- {f}\n"
+                with open(f, "rb") as file:
+                    data = file.read()
+                
+                file_contents.append({"name": f.split("/")[-1], "data": data})
+
+        
+
+        # print(f"file info {file_contents}")
+        # print(f"message {message}")
+
+        full_message = f"{message} {f'Use the provided files {file_contents}' if len(file_contents) > 0 else ""}"
+
+        print(f"full message {full_message}")
+
         state = {
-            "messages": message,
+            "messages": full_message,
             "success_criteria": success_criteria or "The answer should be clear and accurate",
             "feedback_on_work": None,
             "success_criteria_met": False,
             "user_input_needed": False,
         }
         result = await self.graph.ainvoke(state, config=config)
-        user = {"role": "user", "content": message}
+        user = {"role": "user", "content": full_message}
         reply = {"role": "assistant", "content": result["messages"][-2].content}
         feedback = {"role": "assistant", "content": result["messages"][-1].content}
         return history + [user, reply, feedback]
