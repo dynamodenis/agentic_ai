@@ -231,6 +231,6 @@ MIT License - feel free to use and modify!
 
 ---
 
-**Made with ❤️ by [DynamoDenis254](https://huggingface.co/dynamodenis254)** [LinkedIn](https://www.linkedin.com/in/dynamo-denis-mbugua-53304b197/)
+**Made with ❤️ by [DynamoDenis254](https://huggingface.co/dynamodenis254) [LinkedIn](https://www.linkedin.com/in/dynamo-denis-mbugua-53304b197/)**
 
 ⭐ Star this project if you find it interesting!
