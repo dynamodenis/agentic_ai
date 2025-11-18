@@ -229,7 +229,7 @@ def start_trading_floor_and_thread():
 # Main UI construction
 def create_ui():
     """Create the main Gradio UI for the trading simulation"""
-    print(f"stop event {stop_event.is_set()}")
+    print(f"Stop event {stop_event.is_set()}")
 
     traders = [
         Trader(trader_name, lastname, model_name)
