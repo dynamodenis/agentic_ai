@@ -4,7 +4,7 @@ from util import css, js, Color
 import pandas as pd
 from trading_floor import names, lastnames, short_model_names
 import plotly.express as px
-from accounts import Account
+from accounts import Account, INITIAL_BALANCE
 from database import read_log
 import threading
 from trading_floor import run_every_n_minutes
@@ -82,6 +82,7 @@ class Trader:
 
     def get_portfolio_value(self) -> str:
         """Calculate total portfolio value based on current prices"""
+        initial_value = INITIAL_BALANCE
         portfolio_value = self.account.calculate_portfolio_value() or 0.0
         pnl = self.account.calculate_profit_loss(portfolio_value) or 0.0
         color = "green" if pnl >= 0 else "red"
