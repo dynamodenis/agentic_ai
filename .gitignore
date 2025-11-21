@@ -181,3 +181,7 @@ cython_debug/
 # Ignore Accounts database in capstone project
 6_mcp/accounts.db
 6_mcp/memory/*.db
+
+# Ignore Accounts database in capstone project
+7_mcp_alpaca/accounts.db
+7_mcp_alpaca/memory/*.db
