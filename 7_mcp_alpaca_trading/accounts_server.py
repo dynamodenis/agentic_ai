@@ -5,12 +5,25 @@ mcp = FastMCP("accounts_server")
 
 
 @mcp.tool()
-async def update_account_holdings_when_you_buy(
+async def update_buy_account_holdings_transactions(
     name: str, symbol: str, quantity: int, rationale: str, price: float
 ) -> dict[str, int]:
     """Update account holdings when you buy shares for the specific account."""
+    print(f"update transactions for {symbol}")
+
     return Account.get(name).update_holdings_and_transactions(
         "buy", symbol, quantity, rationale, price
+    )
+
+@mcp.tool()
+async def update_sell_account_holdings_transactions(
+    name: str, symbol: str, quantity: int, rationale: str, price: float
+) -> dict[str, int]:
+    """Update account holdings when you buy shares for the specific account."""
+
+    print(f"update transactions for {symbol}")
+    return Account.get(name).update_holdings_and_transactions(
+        "sell", symbol, quantity, rationale, price
     )
 
 
@@ -61,7 +74,7 @@ async def update_account_holdings_when_you_buy(
 
 
 @mcp.tool()
-async def log_trade(name: str, type: str, message: str) -> str:
+async def update_log_trade(name: str, type: str, message: str) -> str:
     """
     Write a log entry to the logs table.
 
