@@ -1,3 +1,4 @@
+from typing import Literal
 from pydantic import BaseModel
 import json
 from dotenv import load_dotenv
@@ -11,7 +12,8 @@ load_dotenv(override=True)
 
 INITIAL_BALANCE = 10_000.0
 SPREAD = 0.002
-    
+
+
 class Transaction(BaseModel):
     symbol: str
     quantity: int
@@ -153,6 +155,34 @@ class Account(BaseModel):
         self.save()
         write_log(self.name, "account", f"Sold {quantity} of {symbol}")
         return "Completed. Latest details:\n" + self.report()
+
+    def update_holdings_and_transactions(
+        self, action: Literal["buy", "sell"], symbol: str, quantity: int, rationale: str, price: float
+    ) -> dict[str, int]:
+        """Update holdings and record a transaction for manual adjustments."""
+        if action == "buy":
+            self.holdings[symbol] = self.holdings.get(symbol, 0) + quantity
+            signed_quantity = quantity
+        else:
+            if self.holdings.get(symbol, 0) < quantity:
+                raise ValueError(
+                    f"Cannot sell {quantity} shares of {symbol}. Not enough shares held."
+                )
+            self.holdings[symbol] -= quantity
+            if self.holdings[symbol] == 0:
+                del self.holdings[symbol]
+            signed_quantity = -quantity
+
+        transaction = Transaction(
+            symbol=symbol,
+            quantity=signed_quantity,
+            price=price,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            rationale=rationale,
+        )
+        self.transactions.append(transaction)
+        self.save()
+        return self.holdings
 
     def calculate_portfolio_value(self):
         """Calculate the total value of the user's portfolio."""

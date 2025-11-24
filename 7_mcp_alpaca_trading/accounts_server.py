@@ -4,6 +4,16 @@ from accounts import Account
 mcp = FastMCP("accounts_server")
 
 
+@mcp.tool()
+async def update_account_holdings_when_you_buy(
+    name: str, symbol: str, quantity: int, rationale: str, price: float
+) -> dict[str, int]:
+    """Update account holdings when you buy shares for the specific account."""
+    return Account.get(name).update_holdings_and_transactions(
+        "buy", symbol, quantity, rationale, price
+    )
+
+
 # @mcp.tool()
 # async def get_balance(name: str) -> float:
 #     """Get the cash balance of the given account name.
@@ -49,6 +59,7 @@ mcp = FastMCP("accounts_server")
 #     """
 #     return Account.get(name).sell_shares(symbol, quantity, rationale)
 
+
 @mcp.tool()
 async def log_trade(name: str, type: str, message: str) -> str:
     """
@@ -62,10 +73,12 @@ async def log_trade(name: str, type: str, message: str) -> str:
     Account.write_log(name, type, message)
     return "ok"
 
+
 @mcp.tool()
 async def get_strategy(name: str) -> str:
     acct = Account.get(name)
     return acct.get_strategy()
+
 
 @mcp.tool()
 async def change_strategy(name: str, strategy: str) -> str:
