@@ -158,8 +158,9 @@ class Account(BaseModel):
 
     def update_holdings_and_transactions(
         self, action: Literal["buy", "sell"], symbol: str, quantity: int, rationale: str, price: float
-    ) -> dict[str, int]:
+    ) -> bool:
         """Update holdings and record a transaction for manual adjustments."""
+        print(f"DEBUG: Updating {action} for {symbol}, quantity: {quantity}, price: {price}")  # ← Add this
         if action == "buy":
             self.holdings[symbol] = self.holdings.get(symbol, 0) + quantity
             signed_quantity = quantity
@@ -181,8 +182,13 @@ class Account(BaseModel):
             rationale=rationale,
         )
         self.transactions.append(transaction)
+        print(f"DEBUG: Before save - holdings: {self.holdings}, transactions count: {len(self.transactions)}")  # ← Add this
         self.save()
-        return self.holdings
+        print(f"DEBUG: After save - account saved successfully")  # ← Add this
+
+        write_log(self.name, "transactions", f"Updated transactions and holdings for {symbol}")
+
+        return True
 
     def calculate_portfolio_value(self):
         """Calculate the total value of the user's portfolio."""
