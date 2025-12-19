@@ -5,7 +5,7 @@ import asyncio
 from tracers import LogTracer
 from agents import add_trace_processor
 from dotenv import load_dotenv
-from util import stop_event, alpaca_is_market_open, alpaca_cancel_stale_orders
+from util import stop_event, alpaca_is_market_open
 import os
 
 load_dotenv(override=True)
@@ -43,6 +43,12 @@ async def run_every_n_minutes():
     """
     Runs trading agents every N minutes, cooperatively stopping when signaled.
     """
+
+    print(
+        "Thread env keys present:",
+        bool(os.getenv("ALPACA_API_KEY")),
+        bool(os.getenv("ALPACA_SECRET_KEY"))
+    )
     add_trace_processor(LogTracer())
     traders = create_traders()
     

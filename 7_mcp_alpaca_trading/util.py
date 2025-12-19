@@ -59,10 +59,12 @@ class Color(Enum):
     CYAN = "#00dddd"
     WHITE = "#87CEEB"
 
+api_key = os.getenv("ALPACA_API_KEY")
+secret_key = os.getenv("ALPACA_SECRET_KEY")
 
 client = TradingClient(
-    api_key=os.getenv("ALPACA_API_KEY"),
-    secret_key=os.getenv("ALPACA_SECRET_KEY"),
+    api_key=api_key,
+    secret_key=secret_key,
     paper=os.getenv("ALPACA_PAPER", "true").lower() == "true"
 )
 
